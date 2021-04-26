@@ -10,69 +10,119 @@
 #include <sstream>
 #include <iomanip>
 
-const int MAX_FRAMES = 100;
-const int MEASUREMENTS_PER_MIN = 10;
+const int MAX_FPS = 160;
+const int MAX_GET_FRAME_TIMINGS = 128;
+const int MEASUREMENTS_PER_SEC = 2;
+const int HISTORY_SIZE = MAX_FPS + MAX_FPS / MEASUREMENTS_PER_SEC;
 
 vr::IVRSystem* _pHMD = NULL;
 vr::IVRCompositor* _pCompositor = NULL;
-vr::Compositor_FrameTiming _timings[MAX_FRAMES];
+vr::Compositor_FrameTiming _timings_history[HISTORY_SIZE];
+vr::Compositor_FrameTiming _get_timings_buff[MAX_GET_FRAME_TIMINGS];
 bool _fStop = false;
 
 double frametime(vr::Compositor_FrameTiming& timing) {
 	return timing.m_flSystemTimeInSeconds;
 }
 
-int get_fps() {
-	
-	_timings[0].m_nSize = sizeof(vr::Compositor_FrameTiming);
-
-	int result = _pCompositor->GetFrameTimings(_timings, MAX_FRAMES);
-	if (result < MAX_FRAMES) {
-		return 0;
+void log_header(std::ostream* pofile) {
+	if (pofile == NULL) {
+		return;
 	}
-	int curIndex = MAX_FRAMES - 1;
-	int countFrames = 0;
-	double lastFrameTimeSec = frametime(_timings[curIndex]);
-	double curFrameTimeSec = lastFrameTimeSec;
+	*pofile << "FPS";
+	*pofile << ", FrameIndex, NumFramePresents, NumMisPresented, NumDroppedFrames";
+	*pofile << ", ReprojectionMotion, PredictedFrames, ThrottledFrames";
+	*pofile << ", SystemTimeInMs, PreSubmitGpuMs, PostSubmitGpuMs, TotalRenderGpuMs";
+	*pofile << ", CompositorRenderGpuMs, CompositorRenderCpuMs, CompositorIdleCpuMs";
+	*pofile << ", ClientFrameIntervalMs";
+	*pofile << ", WaitGetPosesCalledMs, NewPosesReadyMs, NewFrameReadyMs";
+	*pofile << ", CompositorUpdateStartMs, CompositorUpdateEndMs, CompositorRenderStartMs";
+	*pofile << "\n";
+	pofile->setf(std::ios::fixed, std::ios::floatfield); // set fixed floating format
+	pofile->precision(2); // for fixed format, two decimal places
+}
 
-	while (curIndex > 0 && lastFrameTimeSec - curFrameTimeSec < 1.0) {
-		curIndex--;
-		curFrameTimeSec = frametime(_timings[curIndex]);
-		countFrames++;
+void log_row(std::ostream* pofile, vr::Compositor_FrameTiming& t, int fps) {
+	*pofile << fps;
+	*pofile << ", " << t.m_nFrameIndex << ", " << t.m_nNumFramePresents << ", " << t.m_nNumMisPresented << ", " << t.m_nNumDroppedFrames;
+	*pofile << ", " << ((t.m_nReprojectionFlags & vr::VRCompositor_ReprojectionMotion) ? 1 : 0);
+	*pofile << ", " << VR_COMPOSITOR_ADDITIONAL_PREDICTED_FRAMES(t);
+	*pofile << ", " << VR_COMPOSITOR_NUMBER_OF_THROTTLED_FRAMES(t);
+	*pofile << ", " << t.m_flSystemTimeInSeconds * 1000.0;
+	*pofile << ", " << t.m_flPreSubmitGpuMs << ", " << t.m_flPostSubmitGpuMs << ", " << t.m_flTotalRenderGpuMs;
+	*pofile << ", " << t.m_flCompositorRenderGpuMs << ", " << t.m_flCompositorRenderCpuMs << ", " << t.m_flCompositorIdleCpuMs;
+	*pofile << ", " << t.m_flClientFrameIntervalMs;
+	*pofile << ", " << t.m_flWaitGetPosesCalledMs << ", " << t.m_flNewPosesReadyMs << ", " << t.m_flNewFrameReadyMs;
+	*pofile << ", " << t.m_flCompositorUpdateStartMs << ", " << t.m_flCompositorUpdateEndMs << ", " << t.m_flCompositorRenderStartMs;
+	*pofile << "\n";
+}
+void refresh_buffer() {
+	_get_timings_buff[0].m_nSize = sizeof(vr::Compositor_FrameTiming);
+
+	int result = _pCompositor->GetFrameTimings(_get_timings_buff, MAX_GET_FRAME_TIMINGS);
+	if (result < MAX_GET_FRAME_TIMINGS) {
+		return;
 	}
-	
-	return countFrames;
+
+	// Determine how many new frames are in _get_timings_buff
+	int lastHistory = _timings_history[HISTORY_SIZE - 1].m_nFrameIndex;
+	int i = MAX_GET_FRAME_TIMINGS;
+	while (i > 0 && _get_timings_buff[i-1].m_nFrameIndex > lastHistory) {
+		i--;
+	}
+	int cNewFrames = MAX_GET_FRAME_TIMINGS - i;
+	if (cNewFrames == 0) {
+		return;
+	}
+	// move back _timings_history entries to make room for cNewFrames frames
+	int j = 0;
+	for (; j < HISTORY_SIZE - cNewFrames; j++) {
+		_timings_history[j] = _timings_history[j + cNewFrames];
+	}
+	// append new frames
+	for (; j < HISTORY_SIZE; j++) {
+		_timings_history[j] = _get_timings_buff[i++];
+	}
 }
 
 void log_fps(std::ostream* pofile) {
 	using namespace std::chrono_literals;
-	int fpss[MEASUREMENTS_PER_MIN];
-	int i = 0;
+	for (int i = 0; i < HISTORY_SIZE; i++) {
+		_timings_history[i].m_nFrameIndex = 0;
+		_timings_history[1].m_flSystemTimeInSeconds = 0.0;
+	}
+	int lastLoggedIndex = 0;
+	std::cout << "Avg FPS, Min FPS, Max FPS\n";
 	while (!_fStop) {
-		fpss[i++] = get_fps();
-		if (i >= MEASUREMENTS_PER_MIN) {
-			i = 0;
-			int min = 1000;
-			int max = 0;
-			double avg = 0.0;
-			for (int j = 0; j < MEASUREMENTS_PER_MIN; j++) {
-				min = fpss[j] < min ? fpss[j] : min;
-				max = fpss[j] > max ? fpss[j] : max;
-				avg += fpss[j];
-			}
-			avg /= MEASUREMENTS_PER_MIN;
-			
-			std::time_t t = std::time(nullptr);
-			double fps = get_fps();
-			std::stringstream strLine;
-			strLine << t << ", " << std::put_time(std::localtime(&t), "%F %T");
-			strLine << ", " << min << ", " << max << ", " << avg << "\n";
-			std::cout << strLine.str();
-			if (pofile) {
-				*pofile << strLine.str();
-			}
+		refresh_buffer();
+		int max = 0;
+		int min = 1000;
+		double avg = 0;
+		int count = 0;
+		int currIndex = 0;
+		while (_timings_history[currIndex].m_nFrameIndex <= lastLoggedIndex && currIndex < HISTORY_SIZE) {
+			currIndex++;
 		}
-		std::this_thread::sleep_for(100ms);
+		int oneSecIndex = 0;
+		while (currIndex < HISTORY_SIZE) {
+			// move oneSecIndex forward
+			while (
+				frametime(_timings_history[currIndex]) - frametime(_timings_history[oneSecIndex]) >= 1.0) {
+				oneSecIndex++;
+			}
+			int fps = currIndex - oneSecIndex + 1;
+			log_row(pofile, _timings_history[currIndex], fps);
+			lastLoggedIndex = _timings_history[currIndex].m_nFrameIndex;
+			max = max < fps ? fps : max;
+			min = min > fps ? fps : min;
+			avg += fps;
+			count++;
+			currIndex++;
+		}
+		
+		std::cout << avg / count << ", " << min << ", " << max << "\n";
+
+		std::this_thread::sleep_for(1000ms / MEASUREMENTS_PER_SEC);
 	}
 }
 
@@ -97,7 +147,7 @@ int main(int argc, char* argv[])
 	std::ofstream* pFile = NULL;
 	if (argc > 1) {
 		std::cout << "Logging to " << argv[1] << "\n";
-		pFile = new std::ofstream(argv[1], std::ofstream::app);
+		pFile = new std::ofstream(argv[1]);
 	}
 
 	_pCompositor = vr::VRCompositor();
@@ -107,6 +157,7 @@ int main(int argc, char* argv[])
 		vr::VR_Shutdown();
 		return false;
 	}
+	log_header(pFile);
 	std::thread loggerThread(log_fps, pFile);
 	std::cout << "Press any key to stop\n";
 	std::cin.get();
