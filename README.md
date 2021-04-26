@@ -1,6 +1,6 @@
 # VRFPSLogger
 
-Simple command line utility to log OpenVR frame rate to concole and an optional log file.
+Simple command line utility to log OpenVR frame rate to console and frame timing data to an optional log file.
 
 ### Usage
 
