@@ -18,6 +18,10 @@ vr::IVRCompositor* _pCompositor = NULL;
 vr::Compositor_FrameTiming _timings[MAX_FRAMES];
 bool _fStop = false;
 
+double frametime(vr::Compositor_FrameTiming& timing) {
+	return timing.m_flSystemTimeInSeconds;
+}
+
 int get_fps() {
 	
 	_timings[0].m_nSize = sizeof(vr::Compositor_FrameTiming);
@@ -28,12 +32,12 @@ int get_fps() {
 	}
 	int curIndex = MAX_FRAMES - 1;
 	int countFrames = 0;
-	double lastFrameTimeSec = _timings[curIndex].m_flSystemTimeInSeconds;
+	double lastFrameTimeSec = frametime(_timings[curIndex]);
 	double curFrameTimeSec = lastFrameTimeSec;
 
 	while (curIndex > 0 && lastFrameTimeSec - curFrameTimeSec < 1.0) {
 		curIndex--;
-		curFrameTimeSec = _timings[curIndex].m_flSystemTimeInSeconds;
+		curFrameTimeSec = frametime(_timings[curIndex]);
 		countFrames++;
 	}
 	
